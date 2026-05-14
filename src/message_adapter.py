@@ -199,6 +199,49 @@ class MessageAdapter:
         "JSON Schema:\n{schema_json}"
     )
 
+    # Tool-use-aware variants: when the model has tools (OpenAI-style
+    # ``tools``) or MCP servers attached, the strict "no text before/after
+    # the JSON" wording is read as "no tool calls allowed", and the model
+    # produces the JSON immediately instead of calling tools first. These
+    # variants explicitly carve out tool calls as permitted before the
+    # final JSON, restoring correct interaction between tool use and
+    # structured output.
+    JSON_MODE_INSTRUCTION_WITH_TOOLS = (
+        "OUTPUT FORMAT — FOLLOW EXACTLY:\n"
+        "1. You MAY (and should, when helpful) call tools during your turn.\n"
+        "   Tool calls and their results are not part of your final message.\n"
+        "2. Your FINAL message (after any tool calls) must be valid JSON — nothing else.\n"
+        "3. The FIRST character of that final message must be { or [\n"
+        "4. The LAST character of that final message must be } or ]\n"
+        "5. FORBIDDEN in the final message: 'Here is the JSON:', explanations,\n"
+        "   markdown code fences, preambles, or any text before/after the JSON.\n"
+        "6. These rules apply ONLY to the final message you emit, not to\n"
+        "   intermediate tool calls."
+    )
+
+    JSON_PROMPT_SUFFIX_WITH_TOOLS = (
+        "\n\n---\n"
+        "Call any tools you need first. Then your FINAL message must be RAW JSON ONLY:\n"
+        "- First character: { or [\n"
+        "- Last character: } or ]\n"
+        "- No preamble, no markdown, no code fences, no explanation in the final message"
+    )
+
+    JSON_SCHEMA_TEMPLATE_WITH_TOOLS = (
+        "Your FINAL message (after any tool calls you need) must be valid JSON\n"
+        "that strictly conforms to the following JSON Schema. Tool calls during\n"
+        "your turn are allowed and encouraged when helpful; the rules below apply\n"
+        "ONLY to the final message you emit after the tool calls complete.\n"
+        "Do not wrap the final JSON in markdown code fences.\n"
+        "Do not include any text before or after the JSON in your final message.\n"
+        "RULES:\n"
+        "- Include ALL required properties from the schema, even if empty or default\n"
+        "- Use the EXACT property names from the schema\n"
+        "- Match the EXACT types specified (number not string, etc.)\n"
+        "- Do not add properties not in the schema\n\n"
+        "JSON Schema:\n{schema_json}"
+    )
+
     # Common preambles that Claude may add before JSON output
     COMMON_PREAMBLES = [
         "Here's the JSON:",

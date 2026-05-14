@@ -1087,6 +1087,12 @@ async def generate_streaming_response(
             "json_object",
             "json_schema",
         )
+        # Soften JSON instructions when tool use is in play; see the
+        # non-streaming branch below for the full rationale.
+        has_mcp_attached = bool(
+            claude_headers and claude_headers.get("mcp_server_names")
+        )
+        json_with_tools = bool(has_tools or has_mcp_attached)
         if json_mode:
             if (
                 request.response_format.type == "json_schema"
@@ -1094,19 +1100,36 @@ async def generate_streaming_response(
             ):
                 schema = request.response_format.json_schema
                 schema_json = json.dumps(schema.schema_ or {}, indent=2)
-                schema_instructions = MessageAdapter.JSON_SCHEMA_TEMPLATE.format(
-                    schema_json=schema_json
+                template = (
+                    MessageAdapter.JSON_SCHEMA_TEMPLATE_WITH_TOOLS
+                    if json_with_tools
+                    else MessageAdapter.JSON_SCHEMA_TEMPLATE
                 )
+                schema_instructions = template.format(schema_json=schema_json)
                 prompt = f"{schema_instructions}\n\n{prompt}"
-                logger.info(f"JSON schema mode (streaming): injected schema into prompt")
-            else:
-                if system_prompt:
-                    system_prompt = f"{MessageAdapter.JSON_MODE_INSTRUCTION}\n\n{system_prompt}"
-                else:
-                    system_prompt = MessageAdapter.JSON_MODE_INSTRUCTION
-                prompt = prompt + MessageAdapter.JSON_PROMPT_SUFFIX
                 logger.info(
-                    "JSON mode enabled (streaming) - instruction added to system and user prompt"
+                    f"JSON schema mode (streaming): injected schema "
+                    f"(tool-use-aware={json_with_tools})"
+                )
+            else:
+                instruction = (
+                    MessageAdapter.JSON_MODE_INSTRUCTION_WITH_TOOLS
+                    if json_with_tools
+                    else MessageAdapter.JSON_MODE_INSTRUCTION
+                )
+                suffix = (
+                    MessageAdapter.JSON_PROMPT_SUFFIX_WITH_TOOLS
+                    if json_with_tools
+                    else MessageAdapter.JSON_PROMPT_SUFFIX
+                )
+                if system_prompt:
+                    system_prompt = f"{instruction}\n\n{system_prompt}"
+                else:
+                    system_prompt = instruction
+                prompt = prompt + suffix
+                logger.info(
+                    f"JSON mode enabled (streaming, tool-use-aware={json_with_tools}) "
+                    f"- instruction added to system and user prompt"
                 )
 
         # Filter content for unsupported features
@@ -1666,6 +1689,16 @@ async def chat_completions(
                 "json_object",
                 "json_schema",
             )
+            # When tool use is possible — either OpenAI-style ``tools`` or MCP
+            # servers attached via X-Claude-MCP-Servers — soften the JSON
+            # instructions so the model is allowed to call tools before
+            # emitting the final JSON. The strict variant treats tool calls
+            # as forbidden "text before the JSON" and causes the model to
+            # skip the tool entirely.
+            has_mcp_attached = bool(
+                claude_headers and claude_headers.get("mcp_server_names")
+            )
+            json_with_tools = bool(has_tools or has_mcp_attached)
             if json_mode:
                 if (
                     request_body.response_format.type == "json_schema"
@@ -1674,21 +1707,38 @@ async def chat_completions(
                     # JSON schema mode: inject schema into prompt (not system_prompt)
                     schema = request_body.response_format.json_schema
                     schema_json = json.dumps(schema.schema_ or {}, indent=2)
-                    schema_instructions = MessageAdapter.JSON_SCHEMA_TEMPLATE.format(
-                        schema_json=schema_json
+                    template = (
+                        MessageAdapter.JSON_SCHEMA_TEMPLATE_WITH_TOOLS
+                        if json_with_tools
+                        else MessageAdapter.JSON_SCHEMA_TEMPLATE
                     )
+                    schema_instructions = template.format(schema_json=schema_json)
                     prompt = f"{schema_instructions}\n\n{prompt}"
                     logger.info(
-                        f"JSON schema mode: injected schema ({len(schema_json)} chars) into prompt"
+                        f"JSON schema mode: injected schema ({len(schema_json)} chars) "
+                        f"into prompt (tool-use-aware={json_with_tools})"
                     )
                 else:
                     # Basic JSON object mode
+                    instruction = (
+                        MessageAdapter.JSON_MODE_INSTRUCTION_WITH_TOOLS
+                        if json_with_tools
+                        else MessageAdapter.JSON_MODE_INSTRUCTION
+                    )
+                    suffix = (
+                        MessageAdapter.JSON_PROMPT_SUFFIX_WITH_TOOLS
+                        if json_with_tools
+                        else MessageAdapter.JSON_PROMPT_SUFFIX
+                    )
                     if system_prompt:
-                        system_prompt = f"{MessageAdapter.JSON_MODE_INSTRUCTION}\n\n{system_prompt}"
+                        system_prompt = f"{instruction}\n\n{system_prompt}"
                     else:
-                        system_prompt = MessageAdapter.JSON_MODE_INSTRUCTION
-                    prompt = prompt + MessageAdapter.JSON_PROMPT_SUFFIX
-                    logger.info("JSON mode enabled - instruction added to system and user prompt")
+                        system_prompt = instruction
+                    prompt = prompt + suffix
+                    logger.info(
+                        f"JSON mode enabled (tool-use-aware={json_with_tools}) — "
+                        f"instruction added to system and user prompt"
+                    )
 
             # Filter content
             prompt = MessageAdapter.filter_content(prompt)
