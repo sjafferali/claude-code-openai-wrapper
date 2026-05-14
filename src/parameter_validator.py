@@ -133,13 +133,21 @@ class ParameterValidator:
 
         # Extract allowed tools
         if "x-claude-allowed-tools" in headers:
-            tools = [tool.strip() for tool in headers["x-claude-allowed-tools"].split(",")]
+            tools = [
+                tool.strip()
+                for tool in headers["x-claude-allowed-tools"].split(",")
+                if tool.strip()
+            ]
             if tools:
                 claude_options["allowed_tools"] = tools
 
         # Extract disallowed tools
         if "x-claude-disallowed-tools" in headers:
-            tools = [tool.strip() for tool in headers["x-claude-disallowed-tools"].split(",")]
+            tools = [
+                tool.strip()
+                for tool in headers["x-claude-disallowed-tools"].split(",")
+                if tool.strip()
+            ]
             if tools:
                 claude_options["disallowed_tools"] = tools
 
@@ -177,6 +185,18 @@ class ParameterValidator:
                     f"Invalid X-Claude-Thinking header: '{thinking}'. "
                     f"Valid values: {sorted(VALID_THINKING_MODES)}"
                 )
+
+        # Extract requested MCP server names (comma-separated). Names refer to
+        # servers previously registered via POST /v1/mcp/servers. Resolution
+        # against the registry happens at the call site, not here.
+        if "x-claude-mcp-servers" in headers:
+            names = [
+                name.strip()
+                for name in headers["x-claude-mcp-servers"].split(",")
+                if name.strip()
+            ]
+            if names:
+                claude_options["mcp_server_names"] = names
 
         return claude_options
 

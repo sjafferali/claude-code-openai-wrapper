@@ -20,6 +20,19 @@ from src.mcp_client import (
 )
 
 
+def _async_cm(value):
+    """Build an async context manager whose ``__aenter__`` returns ``value``.
+
+    Used to mock ``stdio_client``, ``sse_client``, ``streamablehttp_client``,
+    and ``ClientSession`` (all of which are async context managers in the real
+    MCP SDK) under ``AsyncExitStack.enter_async_context``.
+    """
+    cm = MagicMock()
+    cm.__aenter__ = AsyncMock(return_value=value)
+    cm.__aexit__ = AsyncMock(return_value=None)
+    return cm
+
+
 class TestMCPServerConfig:
     """Test the MCPServerConfig dataclass."""
 
@@ -57,6 +70,68 @@ class TestMCPServerConfig:
 
         config1.args.append("--flag")
         assert "--flag" not in config2.args
+
+    def test_stdio_requires_command(self):
+        """stdio transport rejects empty command."""
+        with pytest.raises(ValueError):
+            MCPServerConfig(name="s", type="stdio", command="")
+
+    def test_http_requires_url(self):
+        """http transport rejects missing url."""
+        with pytest.raises(ValueError):
+            MCPServerConfig(name="s", type="http")
+
+    def test_sse_requires_url(self):
+        """sse transport rejects missing url."""
+        with pytest.raises(ValueError):
+            MCPServerConfig(name="s", type="sse")
+
+    def test_invalid_type_rejected(self):
+        """Unknown transport types are rejected."""
+        with pytest.raises(ValueError):
+            MCPServerConfig(name="s", type="ws", command="cmd")
+
+    def test_to_sdk_config_stdio(self):
+        """Stdio config translates to SDK shape with command + args."""
+        config = MCPServerConfig(
+            name="s",
+            command="node",
+            args=["server.js", "--port", "8080"],
+            env={"DEBUG": "1"},
+        )
+        sdk = config.to_sdk_config()
+        assert sdk == {
+            "type": "stdio",
+            "command": "node",
+            "args": ["server.js", "--port", "8080"],
+            "env": {"DEBUG": "1"},
+        }
+
+    def test_to_sdk_config_stdio_omits_env_when_empty(self):
+        """Stdio without env should not include the env key."""
+        config = MCPServerConfig(name="s", command="node")
+        sdk = config.to_sdk_config()
+        assert "env" not in sdk
+
+    def test_to_sdk_config_http(self):
+        """HTTP config translates to SDK shape with url only."""
+        config = MCPServerConfig(
+            name="s", type="http", url="https://example.com/mcp"
+        )
+        assert config.to_sdk_config() == {
+            "type": "http",
+            "url": "https://example.com/mcp",
+        }
+
+    def test_to_sdk_config_sse(self):
+        """SSE config translates to SDK shape with url only."""
+        config = MCPServerConfig(
+            name="s", type="sse", url="https://example.com/sse"
+        )
+        assert config.to_sdk_config() == {
+            "type": "sse",
+            "url": "https://example.com/sse",
+        }
 
 
 class TestMCPServerConnection:
@@ -106,9 +181,9 @@ class TestMCPClient:
     """Test the MCPClient class."""
 
     @pytest.fixture
-    def client(self):
-        """Create a fresh MCPClient for each test."""
-        return MCPClient()
+    def client(self, tmp_path):
+        """Create a fresh MCPClient backed by an isolated registry file."""
+        return MCPClient(registry_path=tmp_path / "mcp-registry.json")
 
     def test_initialization(self, client):
         """MCPClient initializes with empty servers and connections."""
@@ -125,7 +200,9 @@ class TestMCPClient:
         client.register_server(config)
 
         assert "test-server" in client.servers
-        assert client.servers["test-server"] is config
+        # Registry persists via JSON so the readback is a structurally-equal
+        # value, not the same instance.
+        assert client.servers["test-server"] == config
 
     def test_register_server_overwrites_existing(self, client):
         """register_server overwrites existing configuration."""
@@ -176,7 +253,7 @@ class TestMCPClient:
         client.register_server(config)
 
         result = client.get_server("test-server")
-        assert result is config
+        assert result == config
 
     def test_get_server_nonexistent(self, client):
         """get_server returns None for nonexistent server."""
@@ -310,9 +387,9 @@ class TestMCPClientAsync:
     """Test async methods of MCPClient."""
 
     @pytest.fixture
-    def client(self):
-        """Create a fresh MCPClient for each test."""
-        return MCPClient()
+    def client(self, tmp_path):
+        """Create a fresh MCPClient backed by an isolated registry file."""
+        return MCPClient(registry_path=tmp_path / "mcp-registry.json")
 
     @pytest.mark.asyncio
     async def test_connect_server_not_registered(self, client):
@@ -521,17 +598,17 @@ class TestMCPClientConnectServerMCPAvailable:
     """Test connect_server when MCP SDK is available (mocked)."""
 
     @pytest.fixture
-    def client(self):
-        """Create a fresh MCPClient for each test."""
-        return MCPClient()
+    def client(self, tmp_path):
+        """Create a fresh MCPClient backed by an isolated registry file."""
+        return MCPClient(registry_path=tmp_path / "mcp-registry.json")
 
     @pytest.mark.asyncio
     @patch("src.mcp_client.MCP_AVAILABLE", False)
-    async def test_connect_server_mcp_not_available(self):
+    async def test_connect_server_mcp_not_available(self, tmp_path):
         """connect_server returns False when MCP SDK not available."""
         # Create client with mocked MCP_AVAILABLE
         with patch("src.mcp_client.MCP_AVAILABLE", False):
-            client = MCPClient()
+            client = MCPClient(registry_path=tmp_path / "mcp-registry.json")
             config = MCPServerConfig(name="test", command="cmd")
             client.register_server(config)
 
@@ -543,9 +620,9 @@ class TestMCPClientConnectServerWithMocking:
     """Test connect_server with full MCP SDK mocking."""
 
     @pytest.fixture
-    def client(self):
-        """Create a fresh MCPClient for each test."""
-        return MCPClient()
+    def client(self, tmp_path):
+        """Create a fresh MCPClient backed by an isolated registry file."""
+        return MCPClient(registry_path=tmp_path / "mcp-registry.json")
 
     @pytest.mark.asyncio
     async def test_connect_server_success(self, client):
@@ -592,11 +669,14 @@ class TestMCPClientConnectServerWithMocking:
         mock_write = MagicMock()
 
         with patch("src.mcp_client.StdioServerParameters") as mock_params:
-            with patch("src.mcp_client.stdio_client", new_callable=AsyncMock) as mock_stdio:
-                with patch("src.mcp_client.ClientSession") as mock_client_session:
-                    mock_stdio.return_value = (mock_read, mock_write)
-                    mock_client_session.return_value = mock_session
-
+            with patch(
+                "src.mcp_client.stdio_client",
+                return_value=_async_cm((mock_read, mock_write)),
+            ):
+                with patch(
+                    "src.mcp_client.ClientSession",
+                    return_value=_async_cm(mock_session),
+                ):
                     result = await client.connect_server("test")
 
                     assert result is True
@@ -622,11 +702,14 @@ class TestMCPClientConnectServerWithMocking:
         mock_session.list_prompts = AsyncMock(return_value=MagicMock(prompts=[]))
 
         with patch("src.mcp_client.StdioServerParameters"):
-            with patch("src.mcp_client.stdio_client", new_callable=AsyncMock) as mock_stdio:
-                with patch("src.mcp_client.ClientSession") as mock_client_session:
-                    mock_stdio.return_value = (MagicMock(), MagicMock())
-                    mock_client_session.return_value = mock_session
-
+            with patch(
+                "src.mcp_client.stdio_client",
+                return_value=_async_cm((MagicMock(), MagicMock())),
+            ):
+                with patch(
+                    "src.mcp_client.ClientSession",
+                    return_value=_async_cm(mock_session),
+                ):
                     result = await client.connect_server("test")
 
                     assert result is True
@@ -649,11 +732,14 @@ class TestMCPClientConnectServerWithMocking:
         mock_session.list_prompts = AsyncMock(return_value=MagicMock(prompts=[]))
 
         with patch("src.mcp_client.StdioServerParameters"):
-            with patch("src.mcp_client.stdio_client", new_callable=AsyncMock) as mock_stdio:
-                with patch("src.mcp_client.ClientSession") as mock_client_session:
-                    mock_stdio.return_value = (MagicMock(), MagicMock())
-                    mock_client_session.return_value = mock_session
-
+            with patch(
+                "src.mcp_client.stdio_client",
+                return_value=_async_cm((MagicMock(), MagicMock())),
+            ):
+                with patch(
+                    "src.mcp_client.ClientSession",
+                    return_value=_async_cm(mock_session),
+                ):
                     result = await client.connect_server("test")
 
                     assert result is True
@@ -676,11 +762,14 @@ class TestMCPClientConnectServerWithMocking:
         mock_session.list_prompts = AsyncMock(side_effect=RuntimeError("Prompts error"))
 
         with patch("src.mcp_client.StdioServerParameters"):
-            with patch("src.mcp_client.stdio_client", new_callable=AsyncMock) as mock_stdio:
-                with patch("src.mcp_client.ClientSession") as mock_client_session:
-                    mock_stdio.return_value = (MagicMock(), MagicMock())
-                    mock_client_session.return_value = mock_session
-
+            with patch(
+                "src.mcp_client.stdio_client",
+                return_value=_async_cm((MagicMock(), MagicMock())),
+            ):
+                with patch(
+                    "src.mcp_client.ClientSession",
+                    return_value=_async_cm(mock_session),
+                ):
                     result = await client.connect_server("test")
 
                     assert result is True
@@ -697,7 +786,7 @@ class TestMCPClientConnectServerWithMocking:
         client.register_server(config)
 
         with patch("src.mcp_client.StdioServerParameters"):
-            with patch("src.mcp_client.stdio_client", new_callable=AsyncMock) as mock_stdio:
+            with patch("src.mcp_client.stdio_client") as mock_stdio:
                 mock_stdio.side_effect = ConnectionError("Connection refused")
 
                 result = await client.connect_server("test")
@@ -713,7 +802,7 @@ class TestMCPClientConnectServerWithMocking:
         client.register_server(config)
 
         with patch("src.mcp_client.StdioServerParameters"):
-            with patch("src.mcp_client.stdio_client", new_callable=AsyncMock) as mock_stdio:
+            with patch("src.mcp_client.stdio_client") as mock_stdio:
                 mock_stdio.side_effect = ValueError("Invalid config")
 
                 result = await client.connect_server("test")
@@ -729,7 +818,7 @@ class TestMCPClientConnectServerWithMocking:
         client.register_server(config)
 
         with patch("src.mcp_client.StdioServerParameters"):
-            with patch("src.mcp_client.stdio_client", new_callable=AsyncMock) as mock_stdio:
+            with patch("src.mcp_client.stdio_client") as mock_stdio:
                 mock_stdio.side_effect = TimeoutError("Connection timeout")
 
                 result = await client.connect_server("test")
@@ -745,7 +834,7 @@ class TestMCPClientConnectServerWithMocking:
         client.register_server(config)
 
         with patch("src.mcp_client.StdioServerParameters"):
-            with patch("src.mcp_client.stdio_client", new_callable=AsyncMock) as mock_stdio:
+            with patch("src.mcp_client.stdio_client") as mock_stdio:
                 mock_stdio.side_effect = FileNotFoundError("Command not found")
 
                 result = await client.connect_server("test")
@@ -761,7 +850,7 @@ class TestMCPClientConnectServerWithMocking:
         client.register_server(config)
 
         with patch("src.mcp_client.StdioServerParameters"):
-            with patch("src.mcp_client.stdio_client", new_callable=AsyncMock) as mock_stdio:
+            with patch("src.mcp_client.stdio_client") as mock_stdio:
                 mock_stdio.side_effect = PermissionError("Permission denied")
 
                 result = await client.connect_server("test")
@@ -777,11 +866,74 @@ class TestMCPClientConnectServerWithMocking:
         client.register_server(config)
 
         with patch("src.mcp_client.StdioServerParameters"):
-            with patch("src.mcp_client.stdio_client", new_callable=AsyncMock) as mock_stdio:
+            with patch("src.mcp_client.stdio_client") as mock_stdio:
                 mock_stdio.side_effect = RuntimeError("Unexpected error")
 
                 result = await client.connect_server("test")
                 assert result is False
+
+    @pytest.mark.asyncio
+    async def test_connect_server_http_transport(self, client):
+        """connect_server uses streamablehttp_client for http transport."""
+        if not MCP_AVAILABLE:
+            pytest.skip("MCP SDK not available")
+
+        config = MCPServerConfig(
+            name="remote", type="http", url="https://example.com/mcp"
+        )
+        client.register_server(config)
+
+        mock_session = AsyncMock()
+        mock_session.initialize = AsyncMock()
+        mock_session.list_tools = AsyncMock(return_value=MagicMock(tools=[]))
+        mock_session.list_resources = AsyncMock(return_value=MagicMock(resources=[]))
+        mock_session.list_prompts = AsyncMock(return_value=MagicMock(prompts=[]))
+
+        # streamablehttp_client yields (read, write, get_session_id_callback)
+        mock_session_id_cb = MagicMock()
+        with patch(
+            "src.mcp_client.streamablehttp_client",
+            return_value=_async_cm((MagicMock(), MagicMock(), mock_session_id_cb)),
+        ) as mock_http:
+            with patch(
+                "src.mcp_client.ClientSession",
+                return_value=_async_cm(mock_session),
+            ):
+                result = await client.connect_server("remote")
+
+                assert result is True
+                assert "remote" in client.connections
+                mock_http.assert_called_once_with("https://example.com/mcp")
+
+    @pytest.mark.asyncio
+    async def test_connect_server_sse_transport(self, client):
+        """connect_server uses sse_client for sse transport."""
+        if not MCP_AVAILABLE:
+            pytest.skip("MCP SDK not available")
+
+        config = MCPServerConfig(
+            name="sse-remote", type="sse", url="https://example.com/sse"
+        )
+        client.register_server(config)
+
+        mock_session = AsyncMock()
+        mock_session.initialize = AsyncMock()
+        mock_session.list_tools = AsyncMock(return_value=MagicMock(tools=[]))
+        mock_session.list_resources = AsyncMock(return_value=MagicMock(resources=[]))
+        mock_session.list_prompts = AsyncMock(return_value=MagicMock(prompts=[]))
+
+        with patch(
+            "src.mcp_client.sse_client",
+            return_value=_async_cm((MagicMock(), MagicMock())),
+        ) as mock_sse:
+            with patch(
+                "src.mcp_client.ClientSession",
+                return_value=_async_cm(mock_session),
+            ):
+                result = await client.connect_server("sse-remote")
+
+                assert result is True
+                mock_sse.assert_called_once_with("https://example.com/sse")
 
     @pytest.mark.asyncio
     async def test_disconnect_server_exception(self, client):
@@ -809,9 +961,9 @@ class TestMCPClientThreadSafety:
     """Test thread safety of MCPClient operations."""
 
     @pytest.fixture
-    def client(self):
-        """Create a fresh MCPClient for each test."""
-        return MCPClient()
+    def client(self, tmp_path):
+        """Create a fresh MCPClient backed by an isolated registry file."""
+        return MCPClient(registry_path=tmp_path / "mcp-registry.json")
 
     def test_concurrent_server_registration(self, client):
         """Multiple threads can register servers concurrently."""
@@ -885,3 +1037,103 @@ class TestGlobalMCPClientInstance:
         # Should not raise
         result = mcp_client.is_available()
         assert isinstance(result, bool)
+
+
+class TestRegistryPersistence:
+    """Registry survives across MCPClient instances backed by the same file.
+
+    This is the property that makes the registry visible across uvicorn
+    workers: register from one process/client, list from another, and both
+    see the same data.
+    """
+
+    def test_registration_visible_to_second_client(self, tmp_path):
+        path = tmp_path / "registry.json"
+        a = MCPClient(registry_path=path)
+        a.register_server(
+            MCPServerConfig(name="shared", type="http", url="https://x/mcp")
+        )
+
+        b = MCPClient(registry_path=path)
+        assert [s.name for s in b.list_servers()] == ["shared"]
+        assert b.get_server("shared").url == "https://x/mcp"
+
+    def test_unregister_visible_to_second_client(self, tmp_path):
+        path = tmp_path / "registry.json"
+        a = MCPClient(registry_path=path)
+        a.register_server(MCPServerConfig(name="s", command="cmd"))
+
+        b = MCPClient(registry_path=path)
+        assert b.get_server("s") is not None
+        b.unregister_server("s")
+
+        # Original client also sees the removal on the next read.
+        assert a.get_server("s") is None
+
+    def test_missing_registry_file_returns_empty(self, tmp_path):
+        path = tmp_path / "does-not-exist.json"
+        client = MCPClient(registry_path=path)
+        assert client.list_servers() == []
+        assert client.get_server("anything") is None
+
+    def test_corrupt_registry_file_returns_empty(self, tmp_path):
+        path = tmp_path / "registry.json"
+        path.write_text("{ this is not valid json")
+        client = MCPClient(registry_path=path)
+        assert client.list_servers() == []
+
+    def test_registry_file_is_atomic(self, tmp_path):
+        """Saves go through a temp file + os.replace; no partial state."""
+        path = tmp_path / "registry.json"
+        client = MCPClient(registry_path=path)
+        client.register_server(MCPServerConfig(name="s1", command="cmd"))
+        client.register_server(MCPServerConfig(name="s2", command="cmd"))
+
+        # No leftover .tmp files in the directory.
+        leftovers = [
+            p for p in path.parent.iterdir() if p.name.startswith(".mcp-registry-")
+        ]
+        assert leftovers == []
+
+    def test_http_and_sse_configs_round_trip(self, tmp_path):
+        path = tmp_path / "registry.json"
+        a = MCPClient(registry_path=path)
+        a.register_server(
+            MCPServerConfig(name="http-one", type="http", url="https://h/mcp")
+        )
+        a.register_server(
+            MCPServerConfig(name="sse-one", type="sse", url="https://s/sse")
+        )
+
+        b = MCPClient(registry_path=path)
+        names = {s.name: s for s in b.list_servers()}
+        assert names["http-one"].type == "http"
+        assert names["http-one"].url == "https://h/mcp"
+        assert names["sse-one"].type == "sse"
+        assert names["sse-one"].url == "https://s/sse"
+
+    def test_invalid_entries_skipped_with_warning(self, tmp_path, caplog):
+        """Bad entries in the file are dropped, not allowed to break load."""
+        import json
+
+        path = tmp_path / "registry.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "good": {
+                        "name": "good",
+                        "type": "stdio",
+                        "command": "cmd",
+                    },
+                    "bad-http-no-url": {
+                        "name": "bad-http-no-url",
+                        "type": "http",
+                    },
+                    "bad-not-dict": "this should be a dict",
+                }
+            )
+        )
+
+        client = MCPClient(registry_path=path)
+        servers = client.list_servers()
+        assert [s.name for s in servers] == ["good"]

@@ -181,8 +181,18 @@ class ClaudeCodeCLI:
         permission_mode: Optional[str] = None,
         effort: Optional[str] = None,
         thinking: Optional[str] = None,
+        mcp_servers: Optional[Dict[str, Dict[str, Any]]] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """Run Claude Agent using the Python SDK and yield response chunks."""
+
+        # Capture the CLI subprocess's stderr into a bounded ring so we can
+        # attach it to non-success ResultMessage log lines AND to the outer
+        # exception path (subprocess fast-failure: SDK raises before any
+        # message is yielded, so the inner success path never gets to relay
+        # stderr). Lifted to the outer scope so the bottom ``except`` can
+        # read it.
+        stderr_buffer: List[str] = []
+        _STDERR_MAX_LINES = 40
 
         try:
             # Set authentication environment variables (if any)
@@ -193,14 +203,6 @@ class ClaudeCodeCLI:
                     os.environ[key] = value
 
             try:
-                # Capture the CLI subprocess's stderr into a bounded ring so we
-                # can attach it to non-success ResultMessage log lines. The
-                # bundled Claude CLI prints its real failure reason
-                # (auth rejection, permission denial, network error) to
-                # stderr, but previously we only saw the typed SDK error
-                # subtype (``error_during_execution``) and zero context.
-                stderr_buffer: List[str] = []
-                _STDERR_MAX_LINES = 40
 
                 def _stderr_capture(line: str) -> None:
                     stderr_buffer.append(line)
@@ -238,6 +240,18 @@ class ClaudeCodeCLI:
                     options.effort = effort
                 if thinking:
                     options.thinking = thinking
+
+                # Pass MCP server configs through to Claude Code so it can
+                # connect natively and expose tool_use calls to the model.
+                if mcp_servers:
+                    if hasattr(options, "mcp_servers"):
+                        options.mcp_servers = mcp_servers
+                    else:
+                        logger.warning(
+                            "MCP servers were requested but the installed "
+                            "claude-agent-sdk does not expose ClaudeAgentOptions.mcp_servers; "
+                            "ignoring."
+                        )
 
                 # Handle session continuity
                 if continue_session:
@@ -329,7 +343,31 @@ class ClaudeCodeCLI:
                             os.environ[key] = original_value
 
         except Exception as e:
+            # The SDK's stderr reader is a detached task; on subprocess
+            # fast-failure it may not have flushed all output yet. Yield
+            # briefly so any remaining lines land in stderr_buffer before
+            # we read it.
+            try:
+                import asyncio as _asyncio
+
+                await _asyncio.sleep(0.05)
+            except Exception:
+                pass
+            stderr_tail = "\n".join(stderr_buffer).strip()
             logger.error(f"Claude Agent SDK error: {e}")
+            if stderr_tail:
+                logger.error(f"Claude CLI stderr tail:\n{stderr_tail}")
+            else:
+                logger.error(
+                    "Claude CLI stderr was empty (subprocess may have died "
+                    "before the stderr reader produced any lines)"
+                )
+            if mcp_servers:
+                # Aid in triage: dump the MCP server config we actually passed
+                # to Claude Code. Helps spot wrong URL / missing fields / etc.
+                logger.error(
+                    f"Claude CLI invoked with mcp_servers={mcp_servers}"
+                )
             # Emit a dict that matches the shape parse_claude_message expects
             # for a ResultMessage, so the HTTP layer surfaces the failure via
             # ClaudeResultError rather than silently returning empty content.
@@ -338,6 +376,7 @@ class ClaudeCodeCLI:
                 "subtype": "error_during_execution",
                 "is_error": True,
                 "error_message": str(e),
+                "stderr_tail": stderr_tail or None,
                 "num_turns": 0,
                 "duration_ms": 0,
             }

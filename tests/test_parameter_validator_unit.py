@@ -215,6 +215,29 @@ class TestParameterValidatorExtractClaudeHeaders:
         result = ParameterValidator.extract_claude_headers(headers)
         assert result.get("disallowed_tools") == ["Edit", "Delete"]
 
+    def test_empty_allowed_tools_header_omitted(self):
+        """X-Claude-Allowed-Tools with an empty value yields no allowed_tools key.
+
+        Without the empty-filter, an empty header string would produce
+        allowed_tools=[''] (since ''.split(',') == ['']), which is non-empty
+        and would silently scope downstream logic to a meaningless tool name.
+        """
+        headers = {"x-claude-allowed-tools": ""}
+        result = ParameterValidator.extract_claude_headers(headers)
+        assert "allowed_tools" not in result
+
+    def test_blank_allowed_tools_header_omitted(self):
+        """Whitespace/commas-only X-Claude-Allowed-Tools yields no allowed_tools key."""
+        headers = {"x-claude-allowed-tools": " , , "}
+        result = ParameterValidator.extract_claude_headers(headers)
+        assert "allowed_tools" not in result
+
+    def test_empty_disallowed_tools_header_omitted(self):
+        """X-Claude-Disallowed-Tools with an empty value yields no disallowed_tools key."""
+        headers = {"x-claude-disallowed-tools": ""}
+        result = ParameterValidator.extract_claude_headers(headers)
+        assert "disallowed_tools" not in result
+
     def test_extracts_permission_mode(self):
         """X-Claude-Permission-Mode header is extracted correctly."""
         headers = {"x-claude-permission-mode": "bypassPermissions"}
@@ -248,6 +271,40 @@ class TestParameterValidatorExtractClaudeHeaders:
         assert result.get("allowed_tools") == ["Read", "Write"]
         assert result.get("permission_mode") == "default"
         assert result.get("max_thinking_tokens") == 3000
+
+    def test_extracts_mcp_server_names_single(self):
+        """X-Claude-MCP-Servers with one name."""
+        headers = {"x-claude-mcp-servers": "weather-api"}
+        result = ParameterValidator.extract_claude_headers(headers)
+        assert result.get("mcp_server_names") == ["weather-api"]
+
+    def test_extracts_mcp_server_names_multiple(self):
+        """X-Claude-MCP-Servers with comma-separated names."""
+        headers = {"x-claude-mcp-servers": "weather-api,internal-tools,db-lookup"}
+        result = ParameterValidator.extract_claude_headers(headers)
+        assert result.get("mcp_server_names") == [
+            "weather-api",
+            "internal-tools",
+            "db-lookup",
+        ]
+
+    def test_mcp_server_names_strips_whitespace(self):
+        """MCP server names have surrounding whitespace stripped."""
+        headers = {"x-claude-mcp-servers": " weather-api , internal-tools "}
+        result = ParameterValidator.extract_claude_headers(headers)
+        assert result.get("mcp_server_names") == ["weather-api", "internal-tools"]
+
+    def test_mcp_server_names_empty_value_omitted(self):
+        """Empty X-Claude-MCP-Servers does not populate mcp_server_names."""
+        headers = {"x-claude-mcp-servers": ""}
+        result = ParameterValidator.extract_claude_headers(headers)
+        assert "mcp_server_names" not in result
+
+    def test_mcp_server_names_only_commas_omitted(self):
+        """Header containing only commas/whitespace is treated as empty."""
+        headers = {"x-claude-mcp-servers": " , , "}
+        result = ParameterValidator.extract_claude_headers(headers)
+        assert "mcp_server_names" not in result
 
 
 class TestCompatibilityReporter:

@@ -733,6 +733,44 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     return JSONResponse(status_code=422, content=error_response)
 
 
+def _resolve_mcp_servers(
+    requested_names: Optional[List[str]],
+) -> Dict[str, Dict[str, Any]]:
+    """Resolve MCP server names from X-Claude-MCP-Servers against the registry.
+
+    Returns a dict of ``{name: sdk_config}`` ready to assign to
+    ``ClaudeAgentOptions.mcp_servers``. Unknown or disabled names raise
+    HTTPException(400) so callers don't silently lose tools they asked for.
+    """
+    if not requested_names:
+        return {}
+
+    sdk_mcp_servers: Dict[str, Dict[str, Any]] = {}
+    for name in requested_names:
+        server = mcp_client.get_server(name)
+        if server is None:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Unknown MCP server '{name}'. Register it via "
+                    f"POST /v1/mcp/servers before referencing it in "
+                    f"X-Claude-MCP-Servers."
+                ),
+            )
+        if not server.enabled:
+            raise HTTPException(
+                status_code=400,
+                detail=f"MCP server '{name}' is disabled.",
+            )
+        sdk_mcp_servers[name] = server.to_sdk_config()
+
+    logger.info(
+        f"MCP passthrough: forwarding {len(sdk_mcp_servers)} server(s) "
+        f"to Claude Code: {sorted(sdk_mcp_servers.keys())}"
+    )
+    return sdk_mcp_servers
+
+
 def _build_claude_options(
     request: ChatCompletionRequest,
     claude_headers: Optional[Dict[str, Any]] = None,
@@ -756,7 +794,41 @@ def _build_claude_options(
         if validated is not None:
             claude_options["max_tokens"] = validated
 
-    if not request.enable_tools:
+    # Resolve requested MCP server names against the registry.
+    requested_mcp_names = claude_options.pop("mcp_server_names", None)
+    sdk_mcp_servers = _resolve_mcp_servers(requested_mcp_names)
+    if sdk_mcp_servers:
+        claude_options["mcp_servers"] = sdk_mcp_servers
+
+    has_mcp_servers = bool(claude_options.get("mcp_servers"))
+
+    if has_mcp_servers:
+        # Compose the allowed_tools list:
+        # - if a header set allowed_tools, start with that (respect user intent)
+        # - else if enable_tools=True, start with the built-in default set
+        # - else start empty
+        if claude_options.get("allowed_tools"):
+            allowed = list(claude_options["allowed_tools"])
+        elif request.enable_tools:
+            allowed = list(DEFAULT_ALLOWED_TOOLS)
+        else:
+            allowed = []
+
+        # For each attached MCP server, auto-allow ``mcp__<server>__*`` unless
+        # the user already named that server in allowed_tools (in which case
+        # they are explicitly scoping which of its tools may be called).
+        for server_name in claude_options["mcp_servers"]:
+            prefix = f"mcp__{server_name}__"
+            if not any(t.startswith(prefix) for t in allowed):
+                allowed.append(f"{prefix}*")
+        claude_options["allowed_tools"] = allowed
+
+        # Tool calls would otherwise hang on interactive permission prompts.
+        # Mirrors the enable_tools=True branch below.
+        claude_options["permission_mode"] = "bypassPermissions"
+
+        logger.info(f"MCP tools active: allowed_tools={allowed}")
+    elif not request.enable_tools:
         claude_options["disallowed_tools"] = CLAUDE_TOOLS
         claude_options["max_turns"] = DEFAULT_MAX_TURNS_NO_TOOLS
         logger.info(
@@ -965,6 +1037,7 @@ def _run_completion_kwargs(
         "permission_mode": claude_options.get("permission_mode"),
         "effort": claude_options.get("effort"),
         "thinking": claude_options.get("thinking"),
+        "mcp_servers": claude_options.get("mcp_servers"),
         "stream": stream,
     }
 
@@ -1814,8 +1887,10 @@ async def anthropic_messages(
         if system_prompt:
             system_prompt = MessageAdapter.filter_content(system_prompt)
 
-        # Run Claude Code - tools enabled by default for Anthropic SDK clients
-        # (they're typically using this for agentic workflows)
+        # Resolve any MCP servers requested via X-Claude-MCP-Servers header
+        claude_headers = ParameterValidator.extract_claude_headers(dict(request.headers))
+        mcp_servers = _resolve_mcp_servers(claude_headers.get("mcp_server_names"))
+
         chunks = []
         async for chunk in claude_cli.run_completion(
             prompt=prompt,
@@ -1824,6 +1899,7 @@ async def anthropic_messages(
             max_turns=10,
             allowed_tools=DEFAULT_ALLOWED_TOOLS,
             permission_mode="bypassPermissions",
+            mcp_servers=mcp_servers,
             stream=False,
         ):
             chunks.append(chunk)
@@ -3043,8 +3119,10 @@ async def list_mcp_servers(
         server_responses.append(
             MCPServerInfoResponse(
                 name=server.name,
+                type=server.type,
                 command=server.command,
                 args=server.args,
+                url=server.url,
                 description=server.description,
                 enabled=server.enabled,
                 connected=server.name in connections,
@@ -3074,9 +3152,11 @@ async def register_mcp_server(
 
     config = MCPServerConfig(
         name=body.name,
+        type=body.type,
         command=body.command,
         args=body.args,
         env=body.env,
+        url=body.url,
         description=body.description,
         enabled=body.enabled,
     )

@@ -284,6 +284,7 @@ Claude-specific options via HTTP headers:
 | `X-Claude-Effort` | `low`, `medium`, `high`, `max` | Model effort level |
 | `X-Claude-Thinking` | `adaptive`, `enabled`, `disabled` | Extended thinking mode |
 | `X-Claude-Max-Thinking-Tokens` | integer | Thinking token budget |
+| `X-Claude-MCP-Servers` | comma-separated names | Attach registered MCP servers to this completion (see [MCP Servers](#mcp-servers)) |
 | `X-Enable-Cache` | `true` / `1` / `yes` | Opt in to response cache on this request |
 
 ## Supported Models
@@ -383,6 +384,56 @@ See `examples/session_continuity.py` for Python and curl examples.
 | `/v1/mcp/connect` | POST | Connect to MCP server |
 | `/v1/mcp/disconnect` | POST | Disconnect MCP server |
 | `/v1/mcp/stats` | GET | MCP statistics |
+
+#### Attaching MCP servers to a chat completion
+
+Once a server is registered, reference it from any chat completion (or `/v1/messages` request) via the `X-Claude-MCP-Servers` header. The wrapper passes the resolved config straight through to Claude Code via `ClaudeAgentOptions.mcp_servers`, so the model calls the tools natively — there is no system-prompt simulation involved.
+
+Three transports are supported when registering:
+
+```bash
+# stdio (subprocess)
+curl -X POST http://localhost:8000/v1/mcp/servers -H 'Content-Type: application/json' -d '{
+  "name": "local-stdio",
+  "type": "stdio",
+  "command": "node",
+  "args": ["./mcp-server.js"]
+}'
+
+# streamable HTTP (remote)
+curl -X POST http://localhost:8000/v1/mcp/servers -H 'Content-Type: application/json' -d '{
+  "name": "weather-api",
+  "type": "http",
+  "url": "https://mcp.example.com/weather"
+}'
+
+# SSE (remote)
+curl -X POST http://localhost:8000/v1/mcp/servers -H 'Content-Type: application/json' -d '{
+  "name": "remote-sse",
+  "type": "sse",
+  "url": "https://example.com/sse"
+}'
+```
+
+Then attach it to a request:
+
+```python
+response = client.chat.completions.create(
+    model="claude-sonnet-4-6",
+    messages=[{"role": "user", "content": "What's the weather in NYC right now?"}],
+    extra_headers={"X-Claude-MCP-Servers": "weather-api"},
+)
+```
+
+Multiple servers can be listed comma-separated: `X-Claude-MCP-Servers: weather-api, internal-tools`. Unknown or disabled server names return HTTP 400 — the wrapper will not silently strip them.
+
+The registry is persisted to a JSON file (default `/tmp/claude-wrapper-mcp-servers.json`, override with `WRAPPER_MCP_REGISTRY_PATH`) so every uvicorn worker sees the same set of registered servers. To survive container restarts, mount a volume over the file's directory. Writes are atomic (temp file + `os.replace`) and serialized across processes with `fcntl.flock`.
+
+When MCP servers are attached, the wrapper:
+
+- Adds `mcp__<server>__*` to `allowed_tools` for each attached server, so Claude is permitted to call any tool the server exposes. **Scope tighter** by sending an explicit `X-Claude-Allowed-Tools` that names specific MCP tools for that server (e.g. `mcp__weather-api__get_current`); when the user-supplied list already mentions a server, the wrapper will not also add the wildcard for it.
+- Forces `permission_mode=bypassPermissions` (consistent with `enable_tools=true`) so tool calls don't hang on interactive prompts.
+- Composes with `enable_tools=true`: built-in Claude tools and MCP tools are both made available.
 
 ### Cache / Auth / System
 | Endpoint | Method | Description |

@@ -501,6 +501,55 @@ class TestMCPModels:
         with pytest.raises(ValueError):
             MCPServerConfigRequest(name="server", command="")
 
+    def test_mcp_server_stdio_default_type(self):
+        """When type is omitted it defaults to stdio."""
+        config = MCPServerConfigRequest(name="srv", command="node")
+        assert config.type == "stdio"
+        assert config.url is None
+
+    def test_mcp_server_http_transport(self):
+        """HTTP transport requires url and accepts empty command."""
+        config = MCPServerConfigRequest(
+            name="remote-http",
+            type="http",
+            url="https://example.com/mcp",
+        )
+        assert config.type == "http"
+        assert config.url == "https://example.com/mcp"
+
+    def test_mcp_server_sse_transport(self):
+        """SSE transport requires url."""
+        config = MCPServerConfigRequest(
+            name="remote-sse",
+            type="sse",
+            url="https://example.com/sse",
+        )
+        assert config.type == "sse"
+
+    def test_mcp_server_http_requires_url(self):
+        """HTTP transport without url is rejected."""
+        with pytest.raises(ValueError):
+            MCPServerConfigRequest(name="srv", type="http")
+
+    def test_mcp_server_invalid_transport_type(self):
+        """Unknown transport types are rejected."""
+        with pytest.raises(ValueError):
+            MCPServerConfigRequest(name="srv", type="websocket", url="http://x")
+
+    def test_mcp_server_url_scheme_validation(self):
+        """URL must start with http:// or https://."""
+        with pytest.raises(ValueError):
+            MCPServerConfigRequest(
+                name="srv", type="http", url="ftp://example.com"
+            )
+
+    def test_mcp_server_type_normalized_to_lowercase(self):
+        """Transport type values are normalized to lowercase."""
+        config = MCPServerConfigRequest(
+            name="srv", type="HTTP", url="https://example.com"
+        )
+        assert config.type == "http"
+
     def test_mcp_server_info_response(self):
         """Can create MCPServerInfoResponse."""
         info = MCPServerInfoResponse(

@@ -403,12 +403,20 @@ class ToolValidationResponse(BaseModel):
 
 
 class MCPServerConfigRequest(BaseModel):
-    """Request model for registering an MCP server."""
+    """Request model for registering an MCP server.
+
+    Supports three transport types:
+    - ``stdio`` (default): spawns the server as a subprocess. Requires ``command``.
+    - ``http``: connects to a remote streamable-HTTP MCP endpoint. Requires ``url``.
+    - ``sse``: connects to a remote SSE MCP endpoint. Requires ``url``.
+    """
 
     name: str
-    command: str
+    type: str = "stdio"
+    command: str = ""
     args: List[str] = Field(default_factory=list)
     env: Optional[Dict[str, str]] = None
+    url: Optional[str] = None
     description: str = ""
     enabled: bool = True
 
@@ -427,23 +435,60 @@ class MCPServerConfigRequest(BaseModel):
             )
         return v.strip()
 
+    @field_validator("type")
+    @classmethod
+    def validate_type(cls, v: str) -> str:
+        """Validate MCP transport type."""
+        normalized = (v or "").strip().lower()
+        if normalized not in ("stdio", "http", "sse"):
+            raise ValueError(
+                f"Invalid transport type '{v}'. Must be one of: stdio, http, sse"
+            )
+        return normalized
+
     @field_validator("command")
     @classmethod
     def validate_command(cls, v: str) -> str:
-        """Validate MCP server command."""
-        if not v or not v.strip():
-            raise ValueError("Command cannot be empty")
-        if len(v) > 500:
+        """Validate MCP server command (only required for stdio transport)."""
+        if v and len(v) > 500:
             raise ValueError("Command path too long (max 500 characters)")
-        return v.strip()
+        return v.strip() if v else ""
+
+    @field_validator("url")
+    @classmethod
+    def validate_url(cls, v: Optional[str]) -> Optional[str]:
+        """Validate MCP server URL (only required for http/sse transports)."""
+        if v is None:
+            return None
+        v = v.strip()
+        if not v:
+            return None
+        if len(v) > 2000:
+            raise ValueError("URL too long (max 2000 characters)")
+        if not (v.startswith("http://") or v.startswith("https://")):
+            raise ValueError("URL must start with http:// or https://")
+        return v
+
+    @model_validator(mode="after")
+    def validate_transport_fields(self) -> "MCPServerConfigRequest":
+        """Cross-field validation: ensure transport-specific fields are present."""
+        if self.type == "stdio":
+            if not self.command:
+                raise ValueError("stdio transport requires a non-empty 'command'")
+        else:
+            if not self.url:
+                raise ValueError(f"{self.type} transport requires a 'url'")
+        return self
 
 
 class MCPServerInfoResponse(BaseModel):
     """Response model for MCP server information."""
 
     name: str
-    command: str
-    args: List[str]
+    type: str = "stdio"
+    command: str = ""
+    args: List[str] = Field(default_factory=list)
+    url: Optional[str] = None
     description: str
     enabled: bool
     connected: bool
