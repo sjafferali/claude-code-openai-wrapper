@@ -432,7 +432,7 @@ The registry is persisted to a JSON file (default `/tmp/claude-wrapper-mcp-serve
 When MCP servers are attached, the wrapper:
 
 - Adds `mcp__<server>__*` to `allowed_tools` for each attached server, so Claude is permitted to call any tool the server exposes. **Scope tighter** by sending an explicit `X-Claude-Allowed-Tools` that names specific MCP tools for that server (e.g. `mcp__weather-api__get_current`); when the user-supplied list already mentions a server, the wrapper will not also add the wildcard for it.
-- Forces `permission_mode=bypassPermissions` (consistent with `enable_tools=true`) so tool calls don't hang on interactive prompts.
+- Forces `permission_mode=bypassPermissions` (consistent with `enable_tools=true`) so tool calls don't hang on interactive prompts. The bundled Claude CLI refuses this flag when running as root unless `IS_SANDBOX=1` is set; the wrapper auto-sets this for the subprocess when the conditions match (containerised deploys typically run as root and need bypass mode for non-interactive tool execution).
 - Composes with `enable_tools=true`: built-in Claude tools and MCP tools are both made available.
 
 ### Cache / Auth / System

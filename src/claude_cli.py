@@ -202,6 +202,28 @@ class ClaudeCodeCLI:
                     original_env[key] = os.environ.get(key)
                     os.environ[key] = value
 
+            # The bundled Claude CLI refuses ``--dangerously-skip-permissions``
+            # when running as root unless ``IS_SANDBOX=1`` (or the
+            # ``CLAUDE_CODE_BUBBLEWRAP`` flag) is set. Containerised wrapper
+            # deployments run as root by design and need bypass mode for
+            # non-interactive tool execution; opt in to the documented
+            # sandbox flag in that case so the CLI doesn't fast-fail with
+            # exit code 1. Skipped on non-POSIX (no ``os.getuid``) and when
+            # not running as root.
+            if (
+                permission_mode == "bypassPermissions"
+                and hasattr(os, "getuid")
+                and os.getuid() == 0
+                and os.environ.get("IS_SANDBOX") != "1"
+                and not os.environ.get("CLAUDE_CODE_BUBBLEWRAP")
+            ):
+                original_env["IS_SANDBOX"] = os.environ.get("IS_SANDBOX")
+                os.environ["IS_SANDBOX"] = "1"
+                logger.info(
+                    "permission_mode=bypassPermissions requested while running "
+                    "as root; setting IS_SANDBOX=1 for the CLI subprocess"
+                )
+
             try:
 
                 def _stderr_capture(line: str) -> None:
